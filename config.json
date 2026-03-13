@@ -1,0 +1,28 @@
+{
+  "doubao": {
+    "api_key": "7929a2db-9ee1-49ef-9246-1fd950f47dd9",
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "model": "doubao-seed-1-6-250615",
+    "timeout": 120,
+    "max_tokens": 20000,
+    "temperature": 0.2
+  },
+  "xunfei": {
+    "appid": "2f26cf64",
+    "secret": "e69c3a860c7dc52f750a8dc439bb1ec6",
+    "base_url": "https://api.xfyun.cn",
+    "timeout": 60
+  },
+  "system": {
+    "max_retries": 3,
+    "chunk_size": 2000,
+    "default_encoding": "utf-8",
+    "log_level": "INFO"
+  },
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "bit_depth": 16,
+    "format": "wav"
+  }
+}
