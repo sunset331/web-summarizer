@@ -1,2 +1,40 @@
-README.md
-_save_raw_text.py
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 浏览器用户数据目录（自动登录用）
+browser_profile_xiaohongshu/
+browser_profile_zhihu/
+browser_profile_weixin/
+browser_profile_xiaoyuzhoufm/
+browser_profile_wangyiyun/
+
+# 临时/缓存/输出文件
+*.tmp
+*.log
+*.pkl
+tokens/
+
+# 配置文件（允许追踪）
+!config.json
+!*.config.json
+
+# 文档文件（允许追踪）
+!README*.md
+!CONFIG_README.md
+!*.README.md
+
+# 其他文本文件
+*.txt
+
+# IDE/编辑器配置
+.vscode/
+.idea/
+.env
+.DS_Store
+
+# 其他常见忽略
+*.bak
+*.swp 

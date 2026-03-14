@@ -1,4 +1,5 @@
 import argparse
+import sys
 import warnings
 
 # 抑制 pkg_resources 相关的警告
@@ -55,7 +56,15 @@ def main():
 
     else:
         summarizer = ElsepageSummarizer()
-    
+
+    # 无论何种网页，先检测 Edge 驱动与浏览器版本是否一致；不一致则直接中止并给出手动替换提示
+    try:
+        from util.edge_driver_manager import ensure_edge_driver
+        ensure_edge_driver()
+    except RuntimeError as e:
+        print(f"\n[ABORT] {e}")
+        sys.exit(1)
+
     # 处理URL
     summary = process_url(summarizer, args.url, args.key, args.model, args.output)
     

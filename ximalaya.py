@@ -2,7 +2,7 @@ from base import BaseSummarizer
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.edge.service import Service
-from webdriver_manager.microsoft import EdgeChromiumDriverManager
+from util.edge_driver_manager import ensure_edge_driver
 import time
 import os
 
@@ -12,43 +12,20 @@ class XimalayaParser(BaseSummarizer):
         self.audio_url = None  # 用于存储捕获的音频URL
         
     def _init_edge_driver(self):
-        """初始化Edge浏览器驱动"""
+        """初始化Edge浏览器驱动。驱动由 edge_driver_manager 检测/更新。"""
         edge_options = self._get_base_edge_options()
-        
         try:
-            # 首先尝试使用本地msedgedriver
-            local_driver_path = self._find_local_msedgedriver()
-            
-            if local_driver_path:
-                print(f"[INFO] 使用本地Edge驱动: {local_driver_path}")
-                self.driver = webdriver.Edge(
-                    service=Service(local_driver_path),
-                    options=edge_options
-                )
-            else:
-                print("[WARNING] 未找到本地Edge驱动，尝试自动下载...")
-                # 如果本地没有，尝试自动下载（可能失败）
-                self.driver = webdriver.Edge(
-                    service=Service(EdgeChromiumDriverManager().install()),
-                    options=edge_options
-                )
-            
+            driver_path = ensure_edge_driver()
+            self.driver = webdriver.Edge(service=Service(driver_path), options=edge_options)
             self.driver.execute_cdp_cmd(
                 "Page.addScriptToEvaluateOnNewDocument",
                 {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"}
             )
-            # 设置窗口大小为桌面版
             self.driver.set_window_size(1920, 1080)
-            
         except Exception as e:
             print(f"[ERROR] Edge浏览器初始化失败: {e}")
             if "Could not reach host" in str(e) or "getaddrinfo failed" in str(e):
                 print("[ERROR] 网络连接失败，无法自动下载Edge驱动")
-                print("[SOLUTION] 请确保已下载msedgedriver.exe并放置在以下位置之一：")
-                print("  1. 项目根目录")
-                print("  2. D:\\edgedriver_win64\\ (当前检测到的路径)")
-                print("  3. 系统PATH中的任何目录")
-                print(f"[INFO] 当前检测到的本地驱动路径: {self._find_local_msedgedriver()}")
             raise
 
     def _slow_scroll_to_bottom(self, driver, scroll_pause_time=0.5, scroll_step=300):
