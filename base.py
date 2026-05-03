@@ -35,8 +35,7 @@ class BaseSummarizer:
         edge_options.add_argument("--disable-software-rasterizer")
         edge_options.add_argument("--disable-extensions")
         edge_options.add_argument("--disable-plugins")
-        edge_options.add_argument("--disable-images")  # 可选：禁用图片加载提高速度
-        edge_options.add_argument("--disable-javascript")  # 可选：禁用JS提高稳定性
+        # 勿启用 --disable-images / --disable-javascript：小红书/知乎等为 SPA，禁用会导致正文不全、图片无法加载
         edge_options.add_argument("--disable-web-security")
         edge_options.add_argument("--allow-running-insecure-content")
         edge_options.add_argument("--disable-features=VizDisplayCompositor")

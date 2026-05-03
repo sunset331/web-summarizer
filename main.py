@@ -66,7 +66,7 @@ def main():
         sys.exit(1)
 
     # 处理URL
-    summary = process_url(summarizer, args.url, args.key, args.model, args.output)
+    summary, _written = process_url(summarizer, args.url, args.key, args.model, args.output)
     
     if summary:
         print("\n[INFO] 摘要预览:")

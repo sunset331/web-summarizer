@@ -13,14 +13,13 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
+from starlette.middleware.cors import CORSMiddleware
 
 from elsepage import ElsepageSummarizer
 from util.edge_driver_manager import ensure_edge_driver
-from util.generate_summary import generate_summary
-from util.generate_tags import generate_content_tags
-from util.organize_by_tags import organize_by_tags
 from util.process_url import process_url
-from util.save_to_markdown import save_to_markdown
+from util.web_pipelines import run_audio_url_to_dir, run_meeting_zip_to_dir, run_video_file_to_dir
+from util._save_raw_text import safe_filename
 from weixin import WeixinSummarizer
 from xiaohongshu import XiaohongshuSummarizer
 from zhihu import ZhihuSummarizer
@@ -38,23 +37,30 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 class TaskRecord:
     task_id: str
     kind: str
+    module: str
     status: str
     created_at: str
     updated_at: str
     message: str = ""
+    progress: int = 0
     output_path: Optional[str] = None
 
 
-class UrlTaskRequest(BaseModel):
+class UrlBody(BaseModel):
     url: HttpUrl
-    api_key: str = ""
-    model_name: str = ""
 
 
-app = FastAPI(title="Web Summarizer Service", version="0.1.0")
+app = FastAPI(title="Web Summarizer", version="0.2.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.mount("/ui", StaticFiles(directory=os.path.join(BASE_DIR, "ui"), html=True), name="ui")
 
-_executor = ThreadPoolExecutor(max_workers=2)
+_executor = ThreadPoolExecutor(max_workers=1)
 _tasks: Dict[str, TaskRecord] = {}
 _task_lock = threading.Lock()
 
@@ -82,7 +88,6 @@ def _is_usable_lan_ipv4(ip: str) -> bool:
 
 
 def _lan_sort_key(ip: str) -> tuple:
-    """Prefer typical private LAN ranges for display."""
     try:
         a = ipaddress.ip_address(ip)
         if a in ipaddress.ip_network("10.0.0.0/8"):
@@ -118,6 +123,10 @@ def _collect_lan_ipv4() -> List[str]:
     return sorted(found, key=_lan_sort_key)
 
 
+def _advertised_port() -> str:
+    return os.environ.get("WEB_SUMMARIZER_PORT", os.environ.get("PORT", "8000"))
+
+
 def _pick_summarizer(url: str):
     if "xiaohongshu.com" in url or "xhslink.com" in url:
         return XiaohongshuSummarizer()
@@ -128,83 +137,18 @@ def _pick_summarizer(url: str):
     return ElsepageSummarizer()
 
 
-def _run_url_task(task_id: str, request: UrlTaskRequest):
-    _update_task(task_id, status="running", message="Checking Edge driver version")
-    ensure_edge_driver()
-
-    _update_task(task_id, message="Fetching page and generating summary")
-    summarizer = _pick_summarizer(str(request.url))
-    out_dir = os.path.join(OUTPUT_DIR, task_id)
-    os.makedirs(out_dir, exist_ok=True)
-    output_path = os.path.join(out_dir, "summary.md")
-
-    summary = process_url(
-        summarizer=summarizer,
-        url=str(request.url),
-        api_key=request.api_key,
-        model_name=request.model_name,
-        output_path=output_path,
-    )
-    if not summary:
-        raise RuntimeError("Failed to produce summary")
-
-    _update_task(
-        task_id,
-        status="done",
-        message="Done",
-        output_path=output_path,
-    )
-
-
-def _decode_uploaded_text(raw: bytes) -> str:
-    for encoding in ("utf-8", "gbk", "gb2312"):
-        try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise ValueError("Unsupported file encoding; use UTF-8 or GBK text")
-
-
-def _run_file_task(task_id: str, upload_path: str, original_name: str, api_key: str, model_name: str):
-    _update_task(task_id, status="running", message="Reading uploaded file")
-    with open(upload_path, "rb") as f:
-        raw = f.read()
-
-    text = _decode_uploaded_text(raw)
-    if not text.strip():
-        raise RuntimeError("Uploaded file is empty")
-
-    _update_task(task_id, message="Generating summary and tags")
-    summary = generate_summary(text, api_key=api_key, model_name=model_name)
-    tags = generate_content_tags(text, api_key=api_key, model_name=model_name)
-
-    out_dir = os.path.join(OUTPUT_DIR, task_id)
-    os.makedirs(out_dir, exist_ok=True)
-    base_name = os.path.splitext(original_name)[0] or "upload"
-    output_path = os.path.join(out_dir, f"{base_name}_summary.md")
-
-    source_url = f"file://{original_name}"
-    save_to_markdown(source_url, summary, output_path, model_name, tags)
-    organize_by_tags(output_path, tags)
-
-    _update_task(
-        task_id,
-        status="done",
-        message="Done",
-        output_path=output_path,
-    )
-
-
-def _submit_task(kind: str) -> str:
+def _submit_task(kind: str, module: str) -> str:
     task_id = uuid.uuid4().hex[:12]
     with _task_lock:
         _tasks[task_id] = TaskRecord(
             task_id=task_id,
             kind=kind,
+            module=module,
             status="pending",
-            message="Queued",
             created_at=_now_str(),
             updated_at=_now_str(),
+            message="Queued",
+            progress=0,
         )
     return task_id
 
@@ -213,7 +157,113 @@ def _safe_run(task_id: str, runner, *args):
     try:
         runner(task_id, *args)
     except Exception as exc:
-        _update_task(task_id, status="failed", message=str(exc))
+        _update_task(task_id, status="failed", message=str(exc), progress=0)
+
+
+def _task_progress_cb(task_id: str):
+    def cb(pct: int, msg: str):
+        _update_task(task_id, progress=pct, message=msg)
+
+    return cb
+
+
+def _run_web_url_task(task_id: str, body: UrlBody):
+    _update_task(task_id, status="running", message="Checking Edge driver", progress=3)
+    ensure_edge_driver()
+    _update_task(task_id, message="Fetching page", progress=15)
+    summarizer = _pick_summarizer(str(body.url))
+    out_dir = os.path.join(OUTPUT_DIR, task_id)
+    os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.join(out_dir, "summary.md")
+
+    summary, md_path = process_url(
+        summarizer=summarizer,
+        url=str(body.url),
+        api_key="",
+        model_name="",
+        output_path=output_path,
+    )
+    if not summary or not md_path:
+        raise RuntimeError("Failed to produce summary")
+
+    _update_task(
+        task_id,
+        status="done",
+        message="Done — download the Markdown summary",
+        progress=100,
+        output_path=md_path,
+    )
+
+
+def _run_audio_url_task(task_id: str, body: UrlBody):
+    out_dir = os.path.join(OUTPUT_DIR, task_id)
+    os.makedirs(out_dir, exist_ok=True)
+    _update_task(task_id, status="running", message="Starting audio pipeline", progress=2)
+
+    md_path = run_audio_url_to_dir(str(body.url), out_dir, cb=_task_progress_cb(task_id))
+
+    _update_task(
+        task_id,
+        status="done",
+        message="Done — download the Markdown summary",
+        progress=100,
+        output_path=md_path,
+    )
+
+
+def _run_video_upload_task(task_id: str, upload_path: str, sample_rate: int):
+    out_dir = os.path.join(OUTPUT_DIR, task_id)
+    os.makedirs(out_dir, exist_ok=True)
+    _update_task(task_id, status="running", message="Starting video analysis", progress=2)
+
+    md_path = run_video_file_to_dir(
+        upload_path, out_dir, sample_rate=sample_rate, cb=_task_progress_cb(task_id)
+    )
+
+    try:
+        os.remove(upload_path)
+    except OSError:
+        pass
+
+    _update_task(
+        task_id,
+        status="done",
+        message="Done — download the Markdown report",
+        progress=100,
+        output_path=md_path,
+    )
+
+
+def _run_meeting_zip_task(task_id: str, zip_path: str, understand_images: bool):
+    out_dir = os.path.join(OUTPUT_DIR, task_id)
+    os.makedirs(out_dir, exist_ok=True)
+    _update_task(task_id, status="running", message="Starting meeting pipeline", progress=2)
+
+    md_path = run_meeting_zip_to_dir(
+        zip_path, out_dir, understand_images=understand_images, cb=_task_progress_cb(task_id)
+    )
+
+    try:
+        os.remove(zip_path)
+    except OSError:
+        pass
+
+    _update_task(
+        task_id,
+        status="done",
+        message="Done — download the Markdown meeting notes",
+        progress=100,
+        output_path=md_path,
+    )
+
+
+@app.on_event("startup")
+def _log_listen():
+    p = _advertised_port()
+    ips = _collect_lan_ipv4()
+    print("[INFO] LAN IPv4:", ", ".join(ips) or "(none)")
+    for ip in ips:
+        print(f"[INFO]   Open: http://{ip}:{p}/")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -230,9 +280,6 @@ def health_check():
 
 @app.get("/api/service-urls")
 def service_urls(request: Request):
-    """
-    LAN base URLs for the same Wi-Fi / hotspot. All devices on that network can open these.
-    """
     port = request.url.port
     if port is None:
         port = 443 if request.url.scheme == "https" else 80
@@ -253,34 +300,64 @@ def service_urls(request: Request):
     }
 
 
-@app.post("/api/tasks/url")
-def create_url_task(request: UrlTaskRequest):
-    task_id = _submit_task("url")
-    _executor.submit(_safe_run, task_id, _run_url_task, request)
+@app.post("/api/tasks/web/url")
+def create_web_url_task(body: UrlBody):
+    task_id = _submit_task("web_url", "web")
+    _executor.submit(_safe_run, task_id, _run_web_url_task, body)
     return {"task_id": task_id}
 
 
-@app.post("/api/tasks/file")
-async def create_file_task(
-    file: UploadFile = File(...),
-    api_key: str = Form(default=""),
-    model_name: str = Form(default=""),
-):
-    suffix = os.path.splitext(file.filename or "")[1].lower()
-    if suffix not in {".txt", ".md", ".markdown"}:
-        raise HTTPException(status_code=400, detail="Only .txt / .md / .markdown are supported")
+@app.post("/api/tasks/audio/url")
+def create_audio_url_task(body: UrlBody):
+    task_id = _submit_task("audio_url", "audio")
+    _executor.submit(_safe_run, task_id, _run_audio_url_task, body)
+    return {"task_id": task_id}
 
-    task_id = _submit_task("file")
+
+@app.post("/api/tasks/video/upload")
+async def create_video_upload_task(
+    file: UploadFile = File(...),
+    sample_rate: int = Form(default=3),
+):
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}:
+        raise HTTPException(status_code=400, detail="Video: use mp4 / mkv / mov / webm / avi / m4v")
+
+    task_id = _submit_task("video_upload", "video")
     upload_dir = os.path.join(UPLOAD_DIR, task_id)
     os.makedirs(upload_dir, exist_ok=True)
-    upload_path = os.path.join(upload_dir, file.filename or "upload.txt")
-
+    raw_name = safe_filename(file.filename or "video.mp4")
+    upload_path = os.path.join(upload_dir, raw_name)
     with open(upload_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    _executor.submit(
-        _safe_run, task_id, _run_file_task, upload_path, file.filename or "upload.txt", api_key, model_name
-    )
+    try:
+        sr = int(sample_rate)
+    except (TypeError, ValueError):
+        sr = 3
+
+    _executor.submit(_safe_run, task_id, _run_video_upload_task, upload_path, sr)
+    return {"task_id": task_id}
+
+
+@app.post("/api/tasks/meeting/upload")
+async def create_meeting_upload_task(
+    file: UploadFile = File(...),
+    understand_images: str = Form(default="true"),
+):
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext != ".zip":
+        raise HTTPException(status_code=400, detail="Meeting: upload a .zip of audio + screenshots folder")
+
+    task_id = _submit_task("meeting_zip", "meeting")
+    upload_dir = os.path.join(UPLOAD_DIR, task_id)
+    os.makedirs(upload_dir, exist_ok=True)
+    zip_path = os.path.join(upload_dir, "meeting_bundle.zip")
+    with open(zip_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    ui = understand_images.strip().lower() in ("1", "true", "yes", "on")
+    _executor.submit(_safe_run, task_id, _run_meeting_zip_task, zip_path, ui)
     return {"task_id": task_id}
 
 
@@ -290,7 +367,7 @@ def get_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     data = asdict(task)
-    if task.output_path:
+    if task.output_path and task.status == "done":
         data["download_url"] = f"/api/tasks/{task_id}/download"
     return data
 
@@ -302,7 +379,8 @@ def download_result(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     if task.status != "done" or not task.output_path or not os.path.isfile(task.output_path):
         raise HTTPException(status_code=400, detail="Result not ready or missing")
-    return FileResponse(task.output_path, filename=os.path.basename(task.output_path), media_type="text/markdown")
+    name = os.path.basename(task.output_path)
+    return FileResponse(task.output_path, filename=name, media_type="text/markdown")
 
 
 if __name__ == "__main__":

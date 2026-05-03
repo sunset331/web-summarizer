@@ -5,6 +5,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.edge.service import Service
 from util.edge_driver_manager import ensure_edge_driver
+from util.xhs_session_maintenance import maybe_clear_expired_xhs_session
 import os
 import time
 from datetime import datetime
@@ -14,6 +15,21 @@ import random
 from useragents import USER_AGENTS
 from util._save_raw_text import _save_raw_text, safe_filename
 from PIL import Image
+import re
+import threading
+from typing import Optional
+
+# 避免多线程同时用同一 user-data-dir 启多个 Edge，导致 “Chrome instance exited” / 配置目录锁
+_xhs_fetch_lock = threading.Lock()
+
+
+def _is_note_cdn_url(u: str) -> bool:
+    """笔记配图 CDN（排除头像等）；正文图 URL 均含 notes_pre_post。"""
+    if not u or "xhscdn.com" not in u:
+        return False
+    if "sns-avatar" in u:
+        return False
+    return "notes_pre_post" in u
 
 class XiaohongshuSessionManager:
     """小红书专用的会话管理器"""
@@ -50,8 +66,14 @@ class XiaohongshuSummarizer(BaseSummarizer):
     def _init_edge_driver(self):
         """初始化Edge浏览器驱动，继承基类配置并添加小红书特有设置。驱动由 edge_driver_manager 检测/更新。"""
         browser_profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_profile_xiaohongshu")
+        # 须在启动 Edge 前执行：删除 Cookie 库文件；不得与已占用该 user-data-dir 的进程并发
+        maybe_clear_expired_xhs_session(browser_profile_dir)
         edge_options = self._get_base_edge_options()
         edge_options.add_argument(f"--user-data-dir={browser_profile_dir}")
+        # 无显示器会话 / 远程桌面断开后可设 WEB_SUMMARIZER_EDGE_HEADLESS=1
+        _hl = os.environ.get("WEB_SUMMARIZER_EDGE_HEADLESS", "").strip().lower()
+        if _hl in ("1", "true", "yes"):
+            edge_options.add_argument("--headless=new")
         try:
             driver_path = ensure_edge_driver()
             self.driver = webdriver.Edge(service=Service(driver_path), options=edge_options)
@@ -84,13 +106,81 @@ class XiaohongshuSummarizer(BaseSummarizer):
                 print(f"[ERROR] 关闭小红书弹窗时出错: {str(e)}")
                 break
 
-    def fetch_web_content(self, url: str):
+    def _scroll_note_media_into_view(self) -> None:
+        assert self.driver is not None
+        self.driver.execute_script(
+            """
+            var el = document.querySelector('.media-container') || document.querySelector('.note-slider');
+            if (el) { el.scrollIntoView({block:'center', behavior:'instant'}); }
+            """
+        )
+
+    def _collect_note_image_urls_ordered(self) -> list[str]:
+        """小红书轮播图常为懒加载，img.src 可能为空，需读 currentSrc；并兜底解析页面 HTML。"""
+        assert self.driver is not None
+        merged: list[str] = []
+        seen: set[str] = set()
+
+        def push(u: str) -> None:
+            if not u or not u.startswith(("http://", "https://")):
+                return
+            if not _is_note_cdn_url(u):
+                return
+            if u in seen:
+                return
+            seen.add(u)
+            merged.append(u)
+
+        js_urls = self.driver.execute_script(
+            """
+            const seen = new Set();
+            const out = [];
+            function push(u) {
+              if (!u || !u.startsWith('http')) return;
+              if (u.includes('sns-avatar')) return;
+              if (u.includes('/avatar/1040g')) return;
+              if (!u.includes('notes_pre_post')) return;
+              if (seen.has(u)) return;
+              seen.add(u); out.push(u);
+            }
+            for (const im of document.querySelectorAll('img')) {
+              push(im.getAttribute('src') || '');
+              push(im.currentSrc || '');
+              push(im.getAttribute('data-src') || '');
+            }
+            return out;
+            """
+        )
+        if isinstance(js_urls, list):
+            for u in js_urls:
+                if isinstance(u, str):
+                    push(u)
+
+        html = self.driver.page_source or ""
+        for m in re.finditer(
+            r'https://sns-webpic[^"\'\s<>]+?/notes_pre_post/[^"\'\s<>]+',
+            html,
+            flags=re.I,
+        ):
+            push(m.group(0))
+
+        return merged
+
+    def fetch_web_content(self, url: str, work_dir: Optional[str] = None):
+        with _xhs_fetch_lock:
+            return self._fetch_web_content_impl(url, work_dir)
+
+    def _fetch_web_content_impl(self, url: str, work_dir: Optional[str] = None):
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 if self.driver is None:
                     self._init_edge_driver()
-                headers = {'User-Agent': random.choice(USER_AGENTS)}
+                headers = {
+                    'User-Agent': random.choice(USER_AGENTS),
+                    # 小红书图床常校验 Referer，否则可能 403 或空内容
+                    'Referer': 'https://www.xiaohongshu.com/',
+                }
                 if "xhslink.com" in url:
                     try:
                         resp = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
@@ -106,10 +196,21 @@ class XiaohongshuSummarizer(BaseSummarizer):
                 )
                 self._close_xiaohongshu_popup()
                 title = self.driver.find_element(By.XPATH, '//div[@id="detail-title"]').text.strip()
-                author = self.driver.find_element(By.XPATH, '//span[@class="username"]').text.strip()
-                desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-                folder_name = safe_filename(f"xiaohongshu_{title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-                save_dir = os.path.join(desktop, folder_name)
+                try:
+                    author = self.driver.find_element(By.XPATH, '//span[@class="username"]').text.strip()
+                except Exception:
+                    author = self.driver.find_element(
+                        By.XPATH, '//a[contains(@class,"name")]//span[contains(@class,"username")]'
+                    ).text.strip()
+                if work_dir:
+                    save_dir = os.path.abspath(work_dir)
+                    os.makedirs(save_dir, exist_ok=True)
+                else:
+                    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+                    folder_name = safe_filename(
+                        f"xiaohongshu_{title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    )
+                    save_dir = os.path.join(desktop, folder_name)
                 img_dir = os.path.join(save_dir, "images")
                 os.makedirs(img_dir, exist_ok=True)
                 desc_element = self.driver.find_element(By.XPATH, '//div[@id="detail-desc"]')
@@ -117,22 +218,79 @@ class XiaohongshuSummarizer(BaseSummarizer):
                 for _ in range(3):
                     self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                     time.sleep(1)
-                main_imgs = self.driver.find_elements(By.XPATH, '//img[contains(@class,"note-slider-img")]')
+                self._scroll_note_media_into_view()
+                time.sleep(1.5)
+                try:
+                    WebDriverWait(self.driver, 20).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, ".media-container img, img.note-slider-img")
+                        )
+                    )
+                except Exception:
+                    print("[WARNING] 等待轮播图片节点超时，继续用 JS/HTML 解析 URL")
+
+                primary_urls = self._collect_note_image_urls_ordered()
+                print(f"[INFO] 解析到笔记图片 URL 数量: {len(primary_urls)}")
+                # 优先笔记轮播区域，避免抓到侧栏头像等（见页面结构 media-container / note-slider-img）
+                main_imgs = self.driver.find_elements(
+                    By.XPATH,
+                    '//div[contains(@class,"media-container")]//img[contains(@class,"note-slider-img")]',
+                )
+                if not main_imgs:
+                    main_imgs = self.driver.find_elements(
+                        By.XPATH, '//img[contains(@class,"note-slider-img")]'
+                    )
                 desc_imgs = desc_element.find_elements(By.XPATH, './/img')
                 all_imgs = main_imgs + desc_imgs
+                if not all_imgs:
+                    print("[WARNING] 未匹配到默认图片节点，尝试 CDN 图片备用 XPath...")
+                    all_imgs = self.driver.find_elements(
+                        By.XPATH,
+                        '//img[contains(@src,"xhscdn") or contains(@src,"sns-webpic") '
+                        'or contains(@src,"sns-webpic-qc") or contains(@src,"spectrum")]',
+                    )
                 img_url_set = set()
                 img_records = []
                 img_index = 1
                 inserted_images = set()
                 extracted_content: list[str] = [content_text]
-                for img in all_imgs:  # type: ignore
+
+                def _resolve_img_url_from_element(img_el) -> str:
+                    u = (
+                        img_el.get_attribute("src")
+                        or img_el.get_attribute("data-src")
+                        or img_el.get_attribute("data-original")
+                        or img_el.get_attribute("data-actualsrc")
+                        or ""
+                    )
+                    if (not u or not u.startswith(("http://", "https://"))) and self.driver is not None:
+                        try:
+                            u = self.driver.execute_script(
+                                "var e=arguments[0]; return (e.currentSrc||e.src||e.getAttribute('data-src')||'').trim();",
+                                img_el,
+                            ) or ""
+                        except Exception:
+                            pass
+                    if u and not u.startswith(("http://", "https://")):
+                        u = urljoin(url, u)
+                    return u
+
+                # 优先使用 JS + 源码解析到的 URL（解决懒加载 src 为空）
+                url_walk_order: list[str] = []
+                if primary_urls:
+                    url_walk_order = list(primary_urls)
+                else:
+                    for img in all_imgs:  # type: ignore
+                        cand = _resolve_img_url_from_element(img)
+                        if cand and _is_note_cdn_url(cand):
+                            if cand not in url_walk_order:
+                                url_walk_order.append(cand)
+                        elif cand and cand.startswith(("http://", "https://")):
+                            if "note-slider-img" in (img.get_attribute("class") or "") and cand not in url_walk_order:
+                                url_walk_order.append(cand)
+
+                for img_url in url_walk_order:
                     try:
-                        img_url = (img.get_attribute("src") or 
-                                img.get_attribute("data-src") or 
-                                img.get_attribute("data-original") or
-                                img.get_attribute("data-actualsrc"))
-                        if img_url and not img_url.startswith(("http://", "https://")):
-                            img_url = urljoin(url, img_url)
                         if img_url and img_url.startswith(("http://", "https://")):
                             if img_url in img_url_set:
                                 continue
@@ -158,8 +316,7 @@ class XiaohongshuSummarizer(BaseSummarizer):
                                 except Exception as download_error:
                                     print(f"[ERROR] 图片下载失败: {str(download_error)}")
                                     continue
-                            # 只有下载和保存成功后，才获取alt_text
-                            alt_text = img.get_attribute("alt") or "图片"
+                            alt_text = "图片"
                             if img_url not in inserted_images:
                                 img_records.append({
                                     'path': os.path.join(img_dir, img_name),
@@ -177,8 +334,8 @@ class XiaohongshuSummarizer(BaseSummarizer):
                         try:
                             img_id = int(item.split(":")[1].rstrip("]"))
                             img_info = img_records[img_id]
-                            path = img_info['path'].replace("\\", "/")
-                            final_content.append(f"![{img_info['alt']}]({path})")
+                            rel = os.path.relpath(img_info["path"], save_dir).replace("\\", "/")
+                            final_content.append(f"![{img_info['alt']}]({rel})")
                         except Exception as e:
                             print(f"[ERROR] 图片占位符处理失败: {e}")
                             continue
