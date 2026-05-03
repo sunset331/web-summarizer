@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Web Summarizer</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121a2f;
+      --panel-soft: #19233f;
+      --line: #2a3965;
+      --text: #ecf2ff;
+      --muted: #9bb0df;
+      --brand: #4c8dff;
+      --brand-hover: #6aa1ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: radial-gradient(1200px 800px at 10% -20%, #223a74 0%, var(--bg) 50%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .container { max-width: 1060px; margin: 22px auto; padding: 0 16px; }
+    .hero {
+      background: linear-gradient(120deg, #1b2c57 0%, #131d36 50%, #1d2550 100%);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 10px 24px rgba(5, 10, 30, .35);
+    }
+    .hero h1 { margin: 0; font-size: 26px; }
+    .hero p { margin: 8px 0 0; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .card h2 { margin: 0 0 12px; font-size: 18px; }
+    .row { margin-bottom: 12px; }
+    label { display: block; margin-bottom: 6px; font-size: 13px; color: var(--muted); }
+    input[type="text"], input[type="file"], select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #32467f;
+      border-radius: 8px;
+      background: var(--panel-soft);
+      color: var(--text);
+      outline: none;
+    }
+    input::placeholder { color: #87a0d8; }
+    .actions { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+    button {
+      border: 0;
+      border-radius: 9px;
+      padding: 10px 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: .15s;
+    }
+    .btn-primary { background: var(--brand); color: #fff; }
+    .btn-primary:hover { background: var(--brand-hover); }
+    .btn-secondary { background: #24345f; color: #dbe7ff; border: 1px solid #3f568f; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .features { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+    .feature {
+      background: #14213c;
+      border: 1px solid #2a3d6d;
+      border-radius: 10px;
+      padding: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .status {
+      margin-top: 10px;
+      background: #0f1730;
+      border: 1px dashed #385187;
+      border-radius: 10px;
+      padding: 12px;
+      white-space: pre-wrap;
+      line-height: 1.5;
+    }
+    .hint { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    a { color: #8fb7ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { background: #1a2544; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1>Web / File Summarizer</h1>
+      <p>Submit a URL or a text file. Crawling and summarization run on this machine; other devices only use the browser.</p>
+    </div>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Submit task</h2>
+        <div class="row">
+          <label for="urlInput">Page URL</label>
+          <input id="urlInput" type="text" placeholder="https://example.com/article" />
+        </div>
+        <div class="row">
+          <label for="fileInput">Upload file (.txt / .md / .markdown)</label>
+          <input id="fileInput" type="file" accept=".txt,.md,.markdown" />
+        </div>
+        <div class="row">
+          <label for="apiKeyInput">API key (optional)</label>
+          <input id="apiKeyInput" type="text" placeholder="Leave empty to use server config" />
+        </div>
+        <div class="row">
+          <label for="modelInput">Model name (optional)</label>
+          <input id="modelInput" type="text" placeholder="Leave empty to use server config" />
+        </div>
+        <div class="actions">
+          <button id="urlBtn" class="btn-primary">Submit URL task</button>
+          <button id="fileBtn" class="btn-secondary">Submit file task</button>
+        </div>
+        <p class="hint">Tip: run one task at a time for stable Selenium usage.</p>
+      </section>
+
+      <aside class="card">
+        <h2>Same-network URL</h2>
+        <p class="hint">Use this on <strong>every phone or PC on the same Wi-Fi or hotspot</strong>. Copy and open in the browser.</p>
+        <div class="row">
+          <label for="serviceAddress">Share / open this</label>
+          <input id="serviceAddress" type="text" readonly />
+        </div>
+        <div class="row" id="lanPickRow" style="display:none;">
+          <label for="lanPick">If connection fails, try another interface</label>
+          <select id="lanPick"></select>
+        </div>
+        <p id="lanHint" class="hint"></p>
+        <div class="actions">
+          <button id="copyAddressBtn" class="btn-secondary">Copy URL</button>
+          <button id="healthBtn" class="btn-secondary">Health check</button>
+        </div>
+        <div class="features">
+          <div class="feature">Zhihu, Xiaohongshu, WeChat articles, generic pages.</div>
+          <div class="feature">Output: Markdown with summary and tags.</div>
+          <div class="feature">Server-side browser for sites that need Selenium.</div>
+          <div class="feature">This field is always a LAN URL when the server has one.</div>
+        </div>
+      </aside>
+    </div>
+
+    <section class="card" style="margin-top:16px;">
+      <h2>Task status</h2>
+      <div id="status" class="status">Waiting...</div>
+    </section>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const urlBtn = document.getElementById('urlBtn');
+    const fileBtn = document.getElementById('fileBtn');
+    const serviceAddressInput = document.getElementById('serviceAddress');
+    const lanPick = document.getElementById('lanPick');
+    const lanPickRow = document.getElementById('lanPickRow');
+    const lanHint = document.getElementById('lanHint');
+    const copyAddressBtn = document.getElementById('copyAddressBtn');
+    const healthBtn = document.getElementById('healthBtn');
+
+    function setStatus(text) { statusEl.textContent = text; }
+    function setStatusHtml(html) { statusEl.innerHTML = html; }
+    function setLoading(loading) { urlBtn.disabled = loading; fileBtn.disabled = loading; }
+
+    function statusText(status) {
+      const map = { pending: 'Pending', running: 'Running', done: 'Done', failed: 'Failed' };
+      return map[status] || status;
+    }
+
+    async function refreshShareUrl() {
+      const origin = window.location.origin;
+      const host = window.location.hostname;
+      try {
+        const res = await fetch('/api/service-urls');
+        const data = await res.json();
+        const urls = data.lan_base_urls || [];
+
+        if (urls.length === 0) {
+          lanPickRow.style.display = 'none';
+          serviceAddressInput.value = data.primary_share_url || origin;
+          lanHint.innerHTML = 'No LAN IPv4 was detected on the server. Showing <code>' + (data.primary_share_url || origin) + '</code>. Other devices may need VPN or a tunnel if they are not on the same routed network.';
+          return;
+        }
+
+        if (urls.length === 1) {
+          lanPickRow.style.display = 'none';
+          serviceAddressInput.value = urls[0];
+          lanHint.textContent = 'All devices on the same Wi-Fi or hotspot can open or copy this URL.';
+          return;
+        }
+
+        lanPickRow.style.display = 'block';
+        lanPick.innerHTML = '';
+        urls.forEach((u) => {
+          const opt = document.createElement('option');
+          opt.value = u;
+          opt.textContent = u;
+          lanPick.appendChild(opt);
+        });
+
+        let preferred = urls[0];
+        let byHost = null;
+        try {
+          byHost = urls.find((u) => new URL(u).hostname === host);
+        } catch (e) {
+          byHost = null;
+        }
+        if (byHost) preferred = byHost;
+        lanPick.value = preferred;
+        serviceAddressInput.value = preferred;
+
+        lanPick.onchange = () => {
+          serviceAddressInput.value = lanPick.value;
+        };
+
+        lanHint.textContent = 'Multiple LAN IPs found. Pick one if a device cannot connect.';
+      } catch {
+        lanPickRow.style.display = 'none';
+        serviceAddressInput.value = origin;
+        lanHint.textContent = 'Could not load /api/service-urls. Using current page origin.';
+      }
+    }
+
+    refreshShareUrl();
+
+    async function pollTask(taskId) {
+      let retry = 0;
+      while (retry < 300) {
+        const res = await fetch('/api/tasks/' + taskId);
+        const data = await res.json();
+
+        setStatus(
+          'Task ID: ' + data.task_id + '\n' +
+          'Type: ' + data.kind + '\n' +
+          'Status: ' + statusText(data.status) + '\n' +
+          'Message: ' + data.message + '\n' +
+          'Updated: ' + data.updated_at
+        );
+
+        if (data.status === 'done') {
+          const link = data.download_url || '/api/tasks/' + taskId + '/download';
+          setStatusHtml(
+            'Task ID: ' + data.task_id + '<br>' +
+            'Type: ' + data.kind + '<br>' +
+            'Status: ' + statusText(data.status) + '<br>' +
+            'Message: ' + data.message + '<br>' +
+            'Updated: ' + data.updated_at + '<br>' +
+            '<a href="' + link + '" target="_blank">Download Markdown</a>'
+          );
+          return;
+        }
+
+        if (data.status === 'failed') {
+          setStatusHtml(
+            'Task ID: ' + data.task_id + '<br>Status: ' + statusText(data.status) + '<br>Error: ' + data.message
+          );
+          return;
+        }
+
+        await new Promise((r) => setTimeout(r, 2000));
+        retry += 1;
+      }
+      setStatus('Polling timed out. Refresh and try again.');
+    }
+
+    copyAddressBtn.addEventListener('click', async () => {
+      const text = serviceAddressInput.value;
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus('Copied: ' + text);
+      } catch {
+        setStatus('Copy failed. Select and copy manually: ' + text);
+      }
+    });
+
+    healthBtn.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/health');
+        const data = await res.json();
+        if (!res.ok) throw new Error('bad response');
+        setStatus('OK\nstatus: ' + data.status + '\ntime: ' + data.time);
+      } catch (err) {
+        setStatus('Health check failed: ' + err.message);
+      }
+    });
+
+    urlBtn.addEventListener('click', async () => {
+      const url = document.getElementById('urlInput').value.trim();
+      const apiKey = document.getElementById('apiKeyInput').value.trim();
+      const modelName = document.getElementById('modelInput').value.trim();
+      if (!url) { setStatus('Enter a URL first.'); return; }
+
+      setLoading(true);
+      setStatus('Submitting URL task...');
+      try {
+        const res = await fetch('/api/tasks/url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url, api_key: apiKey, model_name: modelName })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'submit failed');
+        await pollTask(data.task_id);
+      } catch (err) {
+        setStatus('Submit failed: ' + err.message);
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    fileBtn.addEventListener('click', async () => {
+      const file = document.getElementById('fileInput').files[0];
+      const apiKey = document.getElementById('apiKeyInput').value.trim();
+      const modelName = document.getElementById('modelInput').value.trim();
+      if (!file) { setStatus('Choose a file first.'); return; }
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('api_key', apiKey);
+      formData.append('model_name', modelName);
+
+      setLoading(true);
+      setStatus('Submitting file task...');
+      try {
+        const res = await fetch('/api/tasks/file', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'submit failed');
+        await pollTask(data.task_id);
+      } catch (err) {
+        setStatus('Submit failed: ' + err.message);
+      } finally {
+        setLoading(false);
+      }
+    });
+  </script>
+</body>
+</html>
